@@ -1,0 +1,487 @@
+const express = require('express');
+const router = express.Router();
+const prisma = require('../lib/prisma');
+const config = require('../config');
+const { requireAuth, optionalAuth, devAuthBypass } = require('../middleware/auth');
+const {
+  generateSummary,
+  generateTitle,
+  extractActionItems,
+  chatWithTranscript,
+  extractSOAPNotes,
+  analyzeSentiment,
+  extractKeyMoment,
+} = require('../services/openrouter');
+
+// Apply dev auth bypass at router level (must run before requireAuth/optionalAuth)
+router.use(devAuthBypass);
+
+/**
+ * Helper: Find meeting by database ID or Zoom meeting ID
+ * Handles URL-encoded Zoom meeting UUIDs (e.g., %2F -> /, %3D -> =)
+ */
+async function findMeeting(meetingId, ownerId) {
+  const ownerFilter = ownerId ? { ownerId } : {};
+
+  // First try by database ID (UUID format)
+  let meeting = await prisma.meeting.findFirst({
+    where: { id: meetingId, ...ownerFilter },
+  });
+
+  // If not found, try by Zoom meeting ID (unique)
+  if (!meeting) {
+    meeting = await prisma.meeting.findFirst({
+      where: { zoomMeetingId: meetingId, ...ownerFilter },
+    });
+  }
+
+  // If still not found, try URL-decoded version
+  // Zoom meeting UUIDs contain base64 chars (/, +, =) that may be URL-encoded
+  if (!meeting) {
+    try {
+      const decoded = decodeURIComponent(meetingId);
+      if (decoded !== meetingId) {
+        meeting = await prisma.meeting.findFirst({
+          where: { zoomMeetingId: decoded, ...ownerFilter },
+        });
+      }
+    } catch {
+      // Invalid URI component, ignore
+    }
+  }
+
+  return meeting;
+}
+
+/**
+ * Helper: Get transcript text for a meeting
+ */
+async function getTranscriptText(meetingId) {
+  const segments = await prisma.transcriptSegment.findMany({
+    where: { meetingId },
+    orderBy: { seqNo: 'asc' },
+    include: { speaker: true },
+    take: 500,
+  });
+
+  if (segments.length === 0) {
+    return null;
+  }
+
+  // Format as readable transcript
+  return segments
+    .map((seg) => {
+      const speaker = seg.speaker?.displayName || seg.speaker?.label || 'Speaker';
+      return `[${speaker}]: ${seg.text}`;
+    })
+    .join('\n');
+}
+
+/**
+ * POST /api/ai/summary
+ * Generate meeting summary
+ */
+router.post('/summary', requireAuth, async (req, res) => {
+  const { meetingId } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!meetingId) {
+    return res.status(400).json({ error: 'meetingId is required' });
+  }
+
+  try {
+    // Get meeting details (supports both database ID and Zoom meeting ID)
+    const meeting = await findMeeting(meetingId, req.user.id);
+
+    if (!meeting) {
+      return res.status(404).json({ error: 'Meeting not found' });
+    }
+
+    // Get transcript text using the database ID
+    const transcript = await getTranscriptText(meeting.id);
+
+    if (!transcript) {
+      return res.status(400).json({ error: 'No transcript available for this meeting' });
+    }
+
+    // Check for cached summary first
+    if (meeting.summary) {
+      return res.json({
+        meetingId: meeting.id,
+        title: meeting.title,
+        summary: meeting.summary,
+        cached: true,
+      });
+    }
+
+    console.log(`🤖 Generating summary for meeting: ${meeting.title}`);
+
+    // Generate summary
+    const summary = await generateSummary(transcript, meeting.title);
+
+    // Cache the summary
+    try {
+      await prisma.meeting.update({
+        where: { id: meeting.id },
+        data: { summary },
+      });
+    } catch (cacheErr) {
+      console.warn('Failed to cache summary:', cacheErr.message);
+    }
+
+    res.json({
+      meetingId: meeting.id,
+      title: meeting.title,
+      summary,
+    });
+  } catch (error) {
+    console.error('❌ Summary generation error:', error.message);
+    res.status(500).json({ error: 'Failed to generate summary' });
+  }
+});
+
+/**
+ * POST /api/ai/action-items
+ * Extract action items from meeting
+ */
+router.post('/action-items', requireAuth, async (req, res) => {
+  const { meetingId } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!meetingId) {
+    return res.status(400).json({ error: 'meetingId is required' });
+  }
+
+  try {
+    // Get meeting details (supports both database ID and Zoom meeting ID)
+    const meeting = await findMeeting(meetingId, req.user.id);
+
+    if (!meeting) {
+      return res.status(404).json({ error: 'Meeting not found' });
+    }
+
+    // Get transcript text using the database ID
+    const transcript = await getTranscriptText(meeting.id);
+
+    if (!transcript) {
+      return res.status(400).json({ error: 'No transcript available for this meeting' });
+    }
+
+    console.log(`🤖 Extracting action items for meeting: ${meeting.title}`);
+
+    // Extract action items
+    const actionItems = await extractActionItems(transcript);
+
+    res.json({
+      meetingId: meeting.id,
+      title: meeting.title,
+      actionItems,
+    });
+  } catch (error) {
+    console.error('❌ Action items extraction error:', error.message);
+    res.status(500).json({ error: 'Failed to extract action items' });
+  }
+});
+
+/**
+ * POST /api/ai/extract-soap
+ * Extract SOAP notes from healthcare transcript (healthcare vertical)
+ */
+router.post('/extract-soap', requireAuth, async (req, res) => {
+  const { meetingId, transcript, currentSoap } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!transcript) {
+    return res.status(400).json({ error: 'transcript is required' });
+  }
+
+  try {
+    console.log(`🏥 Extracting SOAP notes for meeting: ${meetingId || 'live'}`);
+
+    // Extract SOAP notes using AI
+    const soapNotes = await extractSOAPNotes(transcript, currentSoap || {});
+
+    res.json(soapNotes);
+  } catch (error) {
+    console.error('❌ SOAP extraction error:', error.message);
+    res.status(500).json({ error: 'Failed to extract SOAP notes' });
+  }
+});
+
+/**
+ * POST /api/ai/chat
+ * Chat with transcripts (RAG-based Q&A)
+ */
+router.post('/chat', requireAuth, async (req, res) => {
+  const { meetingId, question } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!question) {
+    return res.status(400).json({ error: 'question is required' });
+  }
+
+  try {
+    let transcript = '';
+    let meetingTitle = 'Meeting';
+
+    if (meetingId) {
+      // Chat about specific meeting (supports both database ID and Zoom meeting ID)
+      const meeting = await findMeeting(meetingId, req.user.id);
+
+      if (!meeting) {
+        return res.status(404).json({ error: 'Meeting not found' });
+      }
+
+      meetingTitle = meeting.title;
+      transcript = await getTranscriptText(meeting.id);
+
+      if (!transcript) {
+        return res.status(400).json({ error: 'No transcript available for this meeting' });
+      }
+    } else {
+      // Chat across all meetings - get recent transcripts
+      const recentMeetings = await prisma.meeting.findMany({
+        where: { ownerId: req.user.id },
+        orderBy: { startTime: 'desc' },
+        take: 5,
+        include: {
+          segments: {
+            orderBy: { seqNo: 'asc' },
+            include: { speaker: true },
+          },
+        },
+      });
+
+      if (recentMeetings.length === 0) {
+        return res.status(400).json({ error: 'No meetings with transcripts found' });
+      }
+
+      // Combine transcripts from recent meetings
+      transcript = recentMeetings
+        .map((m) => {
+          const text = m.segments
+            .map((seg) => {
+              const speaker = seg.speaker?.displayName || seg.speaker?.label || 'Speaker';
+              return `[${speaker}]: ${seg.text}`;
+            })
+            .join('\n');
+          return `--- Meeting: ${m.title} (${m.startTime.toLocaleDateString()}) ---\n${text}`;
+        })
+        .join('\n\n');
+
+      meetingTitle = 'Recent Meetings';
+    }
+
+    console.log(`🤖 Chat question: "${question.substring(0, 50)}..."`);
+
+    // Get AI response
+    const answer = await chatWithTranscript(question, transcript, meetingTitle);
+
+    res.json({
+      meetingId: meetingId || null,
+      question,
+      answer,
+    });
+  } catch (error) {
+    console.error('❌ Chat error:', error.message);
+    res.status(500).json({ error: 'Failed to process question' });
+  }
+});
+
+/**
+ * POST /api/ai/generate-title
+ * Generate a descriptive meeting title from transcript or summary
+ */
+router.post('/generate-title', requireAuth, async (req, res) => {
+  const { meetingId } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!meetingId) {
+    return res.status(400).json({ error: 'meetingId is required' });
+  }
+
+  try {
+    const meeting = await findMeeting(meetingId, req.user.id);
+
+    if (!meeting) {
+      return res.status(404).json({ error: 'Meeting not found' });
+    }
+
+    // Prefer summary (shorter/cheaper) over full transcript
+    let content;
+    if (meeting.summary?.overview) {
+      content = meeting.summary.overview;
+      if (meeting.summary.keyPoints?.length) {
+        content += '\n' + meeting.summary.keyPoints.join('\n');
+      }
+    } else {
+      content = await getTranscriptText(meeting.id);
+      if (!content) {
+        return res.status(400).json({ error: 'No transcript available for this meeting' });
+      }
+    }
+
+    console.log(`🤖 Generating title for meeting: ${meeting.title}`);
+
+    const title = await generateTitle(content, meeting.title);
+
+    res.json({ title });
+  } catch (error) {
+    console.error('❌ Title generation error:', error.message);
+    res.status(500).json({ error: 'Failed to generate title' });
+  }
+});
+
+// Rate limit: one suggest call per meeting per 5 minutes
+const suggestRateLimit = new Map();
+
+/**
+ * POST /api/ai/suggest
+ * Get real-time AI suggestions during meeting (for in-meeting use)
+ */
+router.post('/suggest', optionalAuth, async (req, res) => {
+  const { meetingId, recentTranscript } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!recentTranscript) {
+    return res.status(400).json({ error: 'recentTranscript is required' });
+  }
+
+  // Rate limit per meeting
+  if (meetingId) {
+    const lastCall = suggestRateLimit.get(meetingId);
+    if (lastCall && Date.now() - lastCall < 300000) {
+      return res.status(429).json({ error: 'Too many requests. Wait 5 minutes.' });
+    }
+    suggestRateLimit.set(meetingId, Date.now());
+  }
+
+  try {
+    const { generateSuggestions } = require('../services/openrouter');
+
+    const suggestions = await generateSuggestions(recentTranscript);
+
+    res.json({ suggestions });
+  } catch (error) {
+    console.error('Suggest error:', error.message);
+    // Fall back to empty suggestions on error
+    res.json({ suggestions: [] });
+  }
+});
+
+/**
+ * GET /api/ai/status
+ * Check AI service status
+ */
+router.get('/status', (req, res) => {
+  res.json({
+    enabled: config.aiEnabled,
+    hasApiKey: !!config.openrouterApiKey,
+    defaultModel: config.defaultModel,
+    fallbackModel: config.fallbackModel,
+  });
+});
+
+/**
+ * POST /api/ai/sentiment
+ * Analyze sentiment of customer speech using AI
+ * Used for real-time customer sentiment tracking in support calls
+ */
+router.post('/sentiment', optionalAuth, async (req, res) => {
+  const { text } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!text || typeof text !== 'string' || text.trim().length === 0) {
+    return res.status(400).json({ error: 'text is required' });
+  }
+
+  try {
+    const result = await analyzeSentiment(text.trim());
+    res.json(result);
+  } catch (error) {
+    console.error('❌ Sentiment analysis error:', error.message);
+    res.status(500).json({ error: 'Sentiment analysis failed' });
+  }
+});
+
+/**
+ * POST /api/ai/summary-live
+ * Generate meeting summary from raw transcript text (for live meetings)
+ * Used when we have segments but the meeting isn't saved to DB yet
+ */
+router.post('/summary-live', optionalAuth, async (req, res) => {
+  const { transcript, title } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!transcript || typeof transcript !== 'string' || transcript.trim().length < 50) {
+    return res.status(400).json({ error: 'transcript is required (min 50 chars)' });
+  }
+
+  try {
+    console.log(`🤖 Generating live summary (${transcript.length} chars)`);
+    const summary = await generateSummary(transcript.trim(), title || 'Live Meeting');
+
+    res.json({
+      summary,
+      generatedAt: Date.now(),
+    });
+  } catch (error) {
+    console.error('❌ Live summary generation error:', error.message);
+    res.status(500).json({ error: 'Failed to generate summary' });
+  }
+});
+
+/**
+ * POST /api/ai/key-moment
+ * Analyze a transcript segment to detect if it's a key moment
+ * Used for real-time key moment detection during meetings
+ */
+router.post('/key-moment', optionalAuth, async (req, res) => {
+  const { text } = req.body;
+
+  if (!config.aiEnabled) {
+    return res.status(503).json({ error: 'AI features are disabled' });
+  }
+
+  if (!text || typeof text !== 'string' || text.trim().length < 10) {
+    return res.status(400).json({ error: 'text is required (min 10 chars)' });
+  }
+
+  try {
+    const result = await extractKeyMoment(text.trim());
+    if (result) {
+      res.json(result);
+    } else {
+      res.json({ skip: true });
+    }
+  } catch (error) {
+    console.error('❌ Key moment extraction error:', error.message);
+    res.status(500).json({ error: 'Key moment extraction failed' });
+  }
+});
+
+module.exports = router;

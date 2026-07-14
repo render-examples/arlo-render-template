@@ -1,0 +1,117 @@
+import React, { useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { useZoomSdk } from '../contexts/ZoomSdkContext';
+import useZoomAuth from '../hooks/useZoomAuth';
+import OwlIcon from '../components/OwlIcon';
+import Button from '../components/ui/Button';
+import LoadingSpinner from '../components/ui/LoadingSpinner';
+import './AuthView.css';
+
+export default function AuthView() {
+  const navigate = useNavigate();
+  const { isAuthenticated, isLoading, login } = useAuth();
+  const { isTestMode: isBrowser, runningContext, meetingContext } = useZoomSdk();
+  const { authorize, isAuthorizing, error } = useZoomAuth();
+
+  // Some marketplace app types lack in-client authorize; detect and use browser OAuth instead.
+  const isAuthorizeApiUnsupported = (err) => {
+    if (!err) return false;
+    const message = String(err.message || '');
+    return (
+      err.code === 80004 ||
+      err.reason === 'app_not_support' ||
+      /80004/.test(message) ||
+      /app_not_support/i.test(message)
+    );
+  };
+
+  const getPostAuthDestination = useCallback(() => {
+    if (runningContext === 'inMeeting' && meetingContext?.meetingUUID) {
+      return `/meeting/${encodeURIComponent(meetingContext.meetingUUID)}`;
+    }
+    return '/home';
+  }, [runningContext, meetingContext]);
+
+  // Redirect if already authenticated and SDK context is ready
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    if (runningContext === null) return; // SDK still loading
+    // Wait for meeting context when in a meeting (fetched async after runningContext)
+    if (runningContext === 'inMeeting' && !meetingContext?.meetingUUID) return;
+    navigate(getPostAuthDestination(), { replace: true });
+  }, [isAuthenticated, runningContext, meetingContext, navigate, getPostAuthDestination]);
+
+  // In explicit dev mode (?test=true), allow auth bypass
+  useEffect(() => {
+    if (window.location.search.includes('test=true')) {
+      login({ displayName: 'Test User' });
+      navigate('/home', { replace: true });
+    }
+  }, [login, navigate]);
+
+  const handleConnect = async () => {
+    console.log('handleConnect called:', {
+      isBrowser,
+      runningContext,
+      zoomSdkAvailable: !!window.zoomSdk,
+    });
+    if (isBrowser) {
+      // Outside Zoom — redirect to web OAuth flow
+      console.log('Redirecting to web OAuth (isBrowser=true)');
+      window.location.href = '/api/auth/start';
+      return;
+    }
+    console.log('Using in-client OAuth');
+    try {
+      await authorize();
+      // Navigation handled by the useEffect above after login sets isAuthenticated
+    } catch (err) {
+      if (isAuthorizeApiUnsupported(err)) {
+        // In-meeting OAuth unavailable for this app type; use the browser redirect flow.
+        console.warn('Zoom authorize API not supported for this app/client, falling back to web OAuth');
+        window.location.href = '/api/auth/start';
+        return;
+      }
+      console.error('Authentication error:', err);
+    }
+  };
+
+  // Show spinner while session is being restored or authenticated but waiting for SDK
+  if (isLoading || (isAuthenticated && runningContext === null)) {
+    return (
+      <div className="auth-view">
+        <div className="auth-content">
+          <LoadingSpinner size={48} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="auth-view">
+      <div className="auth-content">
+        <div className="auth-owl">
+          <OwlIcon size={64} />
+        </div>
+
+        <div className="auth-text text-serif">
+          <h1 className="text-3xl">Arlo</h1>
+          <p className="text-muted">
+            In-meeting AI assistant — real-time transcripts, summaries, and action items.
+          </p>
+        </div>
+
+        {error && (
+          <p className="text-sm" style={{ color: 'var(--color-danger, #ef4444)' }}>
+            {error}
+          </p>
+        )}
+
+        <Button size="lg" onClick={handleConnect} disabled={isAuthorizing} className="auth-btn">
+          {isAuthorizing ? 'Connecting...' : 'Connect with Zoom'}
+        </Button>
+      </div>
+    </div>
+  );
+}
