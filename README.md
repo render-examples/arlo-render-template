@@ -112,7 +112,7 @@ Do not set `PUBLIC_URL` on Render unless TLS terminates elsewhere; the app uses 
 | Webhooks 401/403 | `ZOOM_WEBHOOK_TOKEN` must be the Event Subscription Secret Token. |
 | AI 429 | Set `OPENROUTER_API_KEY` or change model. |
 
-More: [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md)
+More: [zoom/arlo troubleshooting](https://github.com/zoom/arlo/blob/main/docs/TROUBLESHOOTING.md)
 
 ## License
 
