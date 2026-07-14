@@ -21,7 +21,7 @@
 
 [Arlo](https://github.com/zoom/arlo) is Zoom Developer Relations’ open-source Zoom App for real-time meeting intelligence. Open it in a meeting, start transcription, get live captions plus AI summaries and action items. Captions come from Zoom RTMS, not a bot in the call.
 
-This repo is the Render-hosted package. Upstream local setup still uses docker-compose and ngrok: [README.UPSTREAM.md](./README.UPSTREAM.md).
+This repo is the Render-hosted package. Upstream local setup still uses docker-compose and ngrok: [zoom/arlo](https://github.com/zoom/arlo).
 
 You need [Zoom RTMS access](https://developers.zoom.us/docs/rtms/getting-started/) for live captions (approval can take a few days). Without it the stack still deploys; transcripts will not stream.
 
