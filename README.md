@@ -42,7 +42,7 @@ This repo packages [zoom/arlo](https://github.com/zoom/arlo) as a one-click Rend
 | **[Zoom RTMS](https://developers.zoom.us/docs/rtms/)** | Live transcript stream into the meeting |
 | **[OpenRouter](https://openrouter.ai/)** | Default AI path (free models work without a key) |
 
-You need [Zoom RTMS access](https://developers.zoom.us/docs/rtms/getting-started/) for live captions (approval can take a few days). Without it the stack still deploys; transcripts will not stream. Upstream local setup still uses docker-compose and ngrok.
+You need [Zoom RTMS access](https://developers.zoom.us/docs/rtms/getting-started/) for live captions (approval can take a few days). Without it the stack still deploys; transcripts will not stream. For upstream local setup, see [zoom/arlo](https://github.com/zoom/arlo).
 
 ## Architecture
 
@@ -165,14 +165,15 @@ More: [zoom/arlo troubleshooting](https://github.com/zoom/arlo/blob/main/docs/TR
 ## Project Structure
 
 ```
-render.yaml       Render Blueprint (web + pservs + Postgres)
-README.md         This file
-LICENSE           MIT (template package)
-.env.example      Local / optional overrides
-assets/           Hero / logo
-backend/          Public Docker API + Prisma
-frontend/         Private CRA Zoom App UI
-rtms/             Private Docker RTMS worker
+render.yaml              Render Blueprint (web + pservs + Postgres)
+README.md                This file
+LICENSE                  MIT (template wrapper)
+.env.example             Optional / local overrides
+assets/                  Hero / logo
+backend/                 Public Docker API + Prisma
+frontend/                Private CRA Zoom App UI (native Node on Render)
+rtms/                    Private Docker RTMS worker
+zoom-app-manifest.json   Optional Zoom Marketplace manifest reference
 ```
 
 ## Learn More
