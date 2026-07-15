@@ -64,5 +64,3 @@ docker-compose.override.yml
 
 # Internal docs (not for public repo)
 docs/DEMO_VIDEO_SCRIPT.md
-
-FIGMA

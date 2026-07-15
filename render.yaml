@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://render.com/schema/render.yaml.json
 #
 # Arlo on Render — Zoom Apps RTMS meeting assistant
-# Template: https://github.com/render-examples/arlo-render-template (after publish)
+# Template: https://github.com/render-examples/arlo-render-template
 # Upstream: https://github.com/zoom/arlo
 #
 # Pattern: docker-fork (hybrid)
@@ -68,6 +68,9 @@ projects:
                   type: pserv
                   name: rtms
                   property: port
+              # AI summaries/chat require AI_ENABLED=true (config.js defaults to false).
+              - key: AI_ENABLED
+                value: "true"
               # Optional: higher OpenRouter rate limits (free models work without a key).
               - key: OPENROUTER_API_KEY
                 sync: false
